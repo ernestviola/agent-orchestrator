@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     apt-get update && apt-get install -y docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
+RUN npm install -g @anthropic-ai/claude-code
+
 RUN git config --global include.path /root/.gitconfig-host
 RUN git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
 
