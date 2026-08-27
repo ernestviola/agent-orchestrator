@@ -1,1 +1,2 @@
 YYYY-MM-DD | Short description of change | Diff reviewed: yes/no | Tests passed: yes/no
+2026-08-27 | Phase 1: container provisioning layer (src/types.ts, src/roles.ts, src/provisioning.ts) + sandbox/ sub-agent & tinyproxy images + unit and integration tests; housekeeping (package.json name/bin, README, AGENTS.md/DESIGN.md fixes) | Diff reviewed: pending | Tests passed: yes (33 unit, 4 integration)

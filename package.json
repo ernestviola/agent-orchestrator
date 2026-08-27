@@ -1,13 +1,22 @@
 {
-  "name": "workspace",
+  "name": "agent-orchestrator",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Multi-agent orchestrator CLI — an orchestrator LLM delegates scoped coding tasks to role-based sub-agents, each in its own isolated Docker container.",
+  "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "agent-orchestrator": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx src/index.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "sandbox:build": "bash sandbox/build.sh"
   },
   "repository": {
     "type": "git",

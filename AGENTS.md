@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-Multi-agent orchestrator CLI. TypeScript/Node. An orchestrator LLM delegates scoped coding tasks to role-based sub-agents (test-engineer, engineer, reviewer), each provisioned as its own isolated Docker container. See `/docs/multi-agent-orchestrator-design-doc.md` for full architecture and rationale.
+Multi-agent orchestrator CLI. TypeScript/Node. An orchestrator LLM delegates scoped coding tasks to role-based sub-agents (test-engineer, engineer, reviewer), each provisioned as its own isolated Docker container. See `docs/DESIGN.md` for full architecture and rationale.
 
 This repo (`agent-orchestrator`) is the orchestrator/provisioning-layer codebase itself — it is the *trusted* tier described in the design doc's "Two-tier container security model." It is not one of the sandboxed sub-agent environments it provisions.
 
@@ -29,7 +29,8 @@ No style guide beyond language defaults yet. TypeScript `strict: true` is enable
 
 ## 4. Testing Instructions
 
-- Full suite: `npm test`
+- Test files live in `tests/`, mirroring `src/`. Unit tests are `tests/*.test.ts`; real-Docker integration tests are `tests/*.integration.test.ts` and are excluded from `npm test` (run `npm run test:integration`).
+- `npm test` — unit suite (fast, dockerode mocked). `npm run typecheck` — strict type-check of `src/` + `tests/` (`npm run build` only compiles `src/`).
 - Single test file: `npx vitest run <path>`
 - Single test by name: `npx vitest run -t "<name>"`
 - Mock Docker/dockerode calls in unit tests for provisioning logic — do not have tests spin up real containers unless explicitly writing an integration test, and label such tests clearly as integration tests.
