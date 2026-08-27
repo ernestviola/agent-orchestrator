@@ -4,6 +4,9 @@ services:
       context: .
       dockerfile: .devcontainer/Dockerfile
     command: sleep infinity
+    env_file:
+      - .env.local
     volumes:
       - .:/workspace:cached
       - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.gitconfig:/root/.gitconfig-host:ro

@@ -39,6 +39,17 @@ User ↔ Orchestrator (LLM, reasons out a build plan with the user)
 
 **Sub-agents** — each is a single-purpose agent running inside its own container, given only the task and the context it needs, nothing more. It reports results back to the orchestrator on completion; its container is disposable and torn down afterward (or kept briefly for the user to inspect, depending on outcome).
 
+## Git credentials and result handoff — a hard boundary
+
+**Sub-agents never receive git credentials, and never perform git operations themselves.** Only the orchestrator (running in the trusted, lighter container) authenticates to GitHub and runs `git add`/`commit`/`push`. This follows the same principle as the role-based file permissions: don't rely on an agent behaving well when the alternative is making the unsafe action structurally impossible. A sub-agent compromised by a prompt injection, a bug, or simple misdirection cannot leak or misuse a credential it was never given.
+
+This has a direct consequence for how sub-agent results get back to the orchestrator, and it's a constraint on the `spin_up_agent` interface itself, not just an implementation detail of the local version:
+
+- **Locally**, this is nearly free: sub-agent containers share bind-mounted directories with the host, so the orchestrator can read a sub-agent's resulting files directly off disk once its container exits — no data transfer step, no credential ever enters the sub-agent's container.
+- **On a cloud backend**, sub-agent compute won't share a filesystem with the orchestrator. The result-handoff mechanism has to become explicit — e.g., the sub-agent writes its output to a designated location (object storage, a structured return payload the orchestrator fetches once the job completes) rather than assuming a shared mount. The boundary (sub-agent never touches git, never holds a git credential) stays identical; only the plumbing for getting its output back changes.
+
+Because of this, **the provisioning layer's interface must define result handoff as an explicit contract** (how a sub-agent's output is retrieved once it completes) rather than leaving it implicit in "shared mounts happen to make this easy locally." Building the local version without this made explicit risks baking in a filesystem assumption that quietly breaks when a cloud backend is added later.
+
 ## Roles (v1 scope: three)
 
 **Test Engineer**
@@ -93,6 +104,21 @@ The orchestrator/provisioning layer and the sub-agent containers it creates have
 **Sub-agent containers (full harness)** — where arbitrary LLM-generated actions actually execute. These get the complete ai-dev-template hardening: capability-dropped, non-root, egress-proxy with domain allowlisting, role-scoped read-only/read-write mounts. This is the isolation boundary the project's core safety property (structural test integrity) actually depends on.
 
 Developing the provisioning layer inside a full sandbox (with the Docker socket mounted) would undermine the isolation it's meant to preserve, so it's built and run with lighter constraints instead — the strict harness is reserved for the untrusted work it provisions, not for itself.
+
+## Deferred decisions
+
+**Separate bot identity for git operations.** Considered using a dedicated GitHub account/identity for the orchestrator's commits and pushes (rather than a PAT under the user's own account), for cleaner attribution and independent credential lifecycle as the orchestrator's access list grows. Not adopted for now — this is a personal tool, not yet at the point where autonomous commit volume or blast-radius concerns justify the setup cost. Revisit if the orchestrator starts committing at a volume or on projects where "authored by me" attribution becomes misleading, or if credential rotation/revocation needs to happen independently of the user's personal GitHub access.
+
+## Credential conventions
+
+All orchestrator credentials live in `.env.local` (gitignored), using provider-prefixed uppercase names matching common SDK defaults where one exists:
+
+```
+GITHUB_TOKEN=...
+OPENROUTER_API_KEY=...
+```
+
+Future access points (cloud provider APIs, etc.) follow the same convention.
 
 ## Relationship to the existing ai-dev-template harness
 

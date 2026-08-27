@@ -3,5 +3,5 @@
   "dockerComposeFile": ["../docker-compose.yml"],
   "service": "workspace",
   "workspaceFolder": "/workspace",
-  "postCreateCommand": "bash hooks/install.sh"
+  "postCreateCommand": "bash hooks/install.sh && npm install"
 }
