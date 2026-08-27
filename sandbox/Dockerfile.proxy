@@ -1,0 +1,12 @@
+# Egress proxy for sub-agent containers (the hardened tier).
+# Ported ~unchanged from ai-dev-template's .devcontainer/Dockerfile.proxy
+# (github.com/ernestviola/ai-dev-template); the allowlist is baked in here rather
+# than mounted via compose, since the provisioning layer starts one proxy per run.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends tinyproxy \
+    && rm -rf /var/lib/apt/lists/*
+COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
+COPY allowed-domains.txt /etc/tinyproxy/allowed-domains.txt
+COPY proxy-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

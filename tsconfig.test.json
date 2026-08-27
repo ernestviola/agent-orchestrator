@@ -1,0 +1,11 @@
+{
+  // Type-checks the test suite under the same strict settings as src/ without
+  // emitting anything. `npm run build` only compiles src/; run `npm run typecheck`
+  // (or CI) to cover tests/.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "tests/**/*"]
+}

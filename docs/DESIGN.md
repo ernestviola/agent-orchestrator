@@ -93,7 +93,7 @@ Cost-tier escalation logic (start with the cheapest plausible model, escalate on
 - **Cloud container provisioning.** V1 targets local Docker, same as the ai-dev-template harness. The provisioning layer's interface should be designed so a cloud backend can be swapped in later without changing how the orchestrator calls it — but the cloud backend itself is not built in v1.
 - **Full cost-tier escalation logic.** Basic per-task model selection ships in v1; automatic cascading (try cheap model, escalate on failure) is a follow-on.
 - **Multi-agent parallelism / complex task graphs.** V1 assumes the orchestrator delegates one task to one sub-agent at a time and waits for a result, not multiple sub-agents working concurrently on interdependent pieces.
-- **A "skills" system.** The earlier idea of loadable skills (named capabilities/prompt templates a role can draw on) is not part of v1's two fixed roles. Worth revisiting once the two-role orchestration loop itself is proven.
+- **A "skills" system.** The earlier idea of loadable skills (named capabilities/prompt templates a role can draw on) is not part of v1's three fixed roles. Worth revisiting once the three-role orchestration loop itself is proven.
 
 ## Two-tier container security model
 
