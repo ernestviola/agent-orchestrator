@@ -1,0 +1,7 @@
+{
+  "name": "agent-orchestrator-dev",
+  "dockerComposeFile": ["../docker-compose.yml"],
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "bash hooks/install.sh"
+}

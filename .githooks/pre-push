@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROTECTED_BRANCHES="main master"
+
+while read local_ref local_sha remote_ref remote_sha; do
+  branch="${remote_ref#refs/heads/}"
+
+  if echo "$PROTECTED_BRANCHES" | grep -qw "$branch"; then
+    # Detect force push: remote sha exists but is not an ancestor of local sha
+    if [ "$remote_sha" != "0000000000000000000000000000000000000000" ]; then
+      if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+        echo "ERROR: Force push to '$branch' is blocked."
+        echo "This is a protected branch. Open a PR instead."
+        exit 1
+      fi
+    fi
+  fi
+done

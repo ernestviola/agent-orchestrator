@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CONFIG="$REPO_ROOT/hooks/config"
+
+# Load language-specific commands
+if [ -f "$CONFIG" ]; then
+  source "$CONFIG"
+fi
+
+# Block staged files matching secret patterns
+STAGED=$(git diff --cached --name-only 2>/dev/null || true)
+if [ -n "$STAGED" ]; then
+  SECRET_PATTERNS=('\.env$' '\.env\.' '\.pem$' '\.key$' '\.p12$' '\.pfx$' 'secret' 'credential' 'token')
+  for pattern in "${SECRET_PATTERNS[@]}"; do
+    matches=$(echo "$STAGED" | grep -iE "$pattern" 2>/dev/null || true)
+    if [ -n "$matches" ]; then
+      echo "ERROR: Blocked — staged files match secret pattern '$pattern':"
+      echo "$matches"
+      echo "Remove these files from staging before committing."
+      exit 1
+    fi
+  done
+fi
+
+# Quality gate
+if [ -z "${LINT_CMD:-}" ] && [ -z "${TEST_CMD:-}" ]; then
+  echo "WARNING: hooks/config has no TEST_CMD or LINT_CMD set. Skipping quality gate."
+  exit 0
+fi
+
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+PROTECTED_BRANCHES="main master"
+IS_PROTECTED=false
+if echo "$PROTECTED_BRANCHES" | grep -qw "$CURRENT_BRANCH"; then
+  IS_PROTECTED=true
+fi
+
+GATE_FAILED=false
+
+if [ -n "${LINT_CMD:-}" ]; then
+  echo "Linting: $LINT_CMD"
+  if ! eval "$LINT_CMD"; then
+    GATE_FAILED=true
+  fi
+fi
+
+if [ -n "${TEST_CMD:-}" ]; then
+  echo "Testing: $TEST_CMD"
+  if ! eval "$TEST_CMD"; then
+    GATE_FAILED=true
+  fi
+fi
+
+if [ "$GATE_FAILED" = true ]; then
+  if [ "$IS_PROTECTED" = true ]; then
+    echo "ERROR: Quality gate failed on protected branch '$CURRENT_BRANCH'. Commit blocked."
+    exit 1
+  else
+    echo "WARNING: Quality gate failed on '$CURRENT_BRANCH'. Commit allowed (not a protected branch)."
+  fi
+fi
