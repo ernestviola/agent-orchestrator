@@ -5,6 +5,8 @@
  *   npm run sandbox:build      # builds orq-sandbox:dev and orq-proxy:dev
  *   run from inside the orchestrator devcontainer (needs the /workspace bind mount
  *   and the mounted Docker socket)
+ *   the end-to-end engineer test also needs OPENROUTER_API_KEY in the environment
+ *   (via .env.local); it is skipped when that is absent.
  *
  * Run with:  npm run test:integration
  * It is excluded from the default `npm test` / pre-commit gate.
@@ -26,6 +28,8 @@ import {
 
 const SANDBOX_IMAGE = 'orq-sandbox:dev';
 const PROXY_IMAGE = 'orq-proxy:dev';
+const SAMPLE_PROJECT = path.join(process.cwd(), 'fixtures', 'sample-project');
+const HAVE_KEY = !!process.env.OPENROUTER_API_KEY;
 
 let deps: ProvisioningDeps;
 let docker: Docker;
@@ -53,6 +57,9 @@ afterEach(async () => {
 
 afterAll(async () => {
   await reap(deps).catch(() => undefined);
+  await fs.rm(path.join(process.cwd(), '.orchestrator-runs'), { recursive: true, force: true }).catch(
+    () => undefined,
+  );
 });
 
 async function labeledCount(): Promise<{ containers: number; networks: number }> {
@@ -62,34 +69,66 @@ async function labeledCount(): Promise<{ containers: number; networks: number }>
 }
 
 describe('spinUpAgent against real Docker', () => {
-  it('reviewer: runs the stub, returns a result, and leaves nothing behind', async () => {
+  it('fails fast (no Docker resources created) when OPENROUTER_API_KEY is missing', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     const before = await labeledCount();
-    const result = await spinUpAgent({ role: 'reviewer', task: { task: 'review the diff' } }, deps);
-
-    expect(result.status).toBe('completed');
-    expect(result.exitCode).toBe(0);
-    expect(result.summary).toMatch(/reviewer/);
-    runsToClean.push(result.runId);
-
-    const log = await fs.readFile(path.join(result.outputDir, 'container.log'), 'utf8');
-    expect(log).toMatch(/\bsrc\b/);
-    expect(log).toMatch(/\btests\b/);
-
-    // teardown in spinUpAgent already removed the container/proxy/network
-    const after = await labeledCount();
-    expect(after.containers).toBe(before.containers);
-    expect(after.networks).toBe(before.networks);
+    try {
+      await expect(
+        spinUpAgent(
+          { role: 'engineer', task: { task: 'implement fizzbuzz' }, projectPath: SAMPLE_PROJECT },
+          deps,
+        ),
+      ).rejects.toThrow(/OPENROUTER_API_KEY is not set/);
+      const after = await labeledCount();
+      expect(after).toEqual(before);
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
   });
 
-  it('engineer: tests/ is not mounted into the container', async () => {
-    const result = await spinUpAgent({ role: 'engineer', task: { task: 'implement X' } }, deps);
-    runsToClean.push(result.runId);
-    expect(result.status).toBe('completed');
+  it.skipIf(!HAVE_KEY)(
+    'engineer: a real model makes the sample project pass, returns a diff, leaves the target untouched',
+    async () => {
+      const before = await labeledCount();
+      const original = await fs.readFile(path.join(SAMPLE_PROJECT, 'src', 'fizzbuzz.mjs'), 'utf8');
 
-    const log = await fs.readFile(path.join(result.outputDir, 'container.log'), 'utf8');
-    expect(log).toMatch(/\bsrc\b/);
-    expect(log).not.toMatch(/\btests\b/);
-  });
+      const result = await spinUpAgent(
+        {
+          role: 'engineer',
+          task: {
+            task: 'Implement fizzbuzz(n) in src/fizzbuzz.mjs so that every test in tests/ passes.',
+          },
+          projectPath: SAMPLE_PROJECT,
+        },
+        deps,
+      );
+      runsToClean.push(result.runId);
+
+      expect(result.status).toBe('completed');
+      expect(result.iterations).toBeGreaterThanOrEqual(1);
+      expect(result.diff).toMatch(/fizzbuzz\.mjs/);
+      expect(result.diff).toMatch(/^\+.*Fizz/m);
+
+      // artifacts retrieved via the ResultStore contract
+      const status = JSON.parse(
+        await fs.readFile(path.join(result.outputDir, 'status.json'), 'utf8'),
+      );
+      expect(status.status).toBe('completed');
+      expect(await fs.readFile(path.join(result.outputDir, 'agent.log'), 'utf8')).toMatch(/iteration/);
+
+      // the real target project on disk was never modified — only the working copy
+      expect(await fs.readFile(path.join(SAMPLE_PROJECT, 'src', 'fizzbuzz.mjs'), 'utf8')).toBe(
+        original,
+      );
+
+      const after = await labeledCount();
+      expect(after.containers).toBe(before.containers);
+      expect(after.networks).toBe(before.networks);
+    },
+    180_000,
+  );
 });
 
 describe('mount + network boundaries (direct probes on the real images)', () => {

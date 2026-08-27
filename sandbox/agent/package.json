@@ -1,0 +1,9 @@
+{
+  "name": "orq-sandbox-agent",
+  "private": true,
+  "type": "module",
+  "description": "In-container agent runtime for sub-agent sandboxes. Baked into orq-sandbox:dev at /opt/agent.",
+  "dependencies": {
+    "undici": "^7.16.0"
+  }
+}

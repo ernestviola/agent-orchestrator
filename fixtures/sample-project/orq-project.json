@@ -1,0 +1,5 @@
+{
+  "testCmd": "node --test",
+  "srcDir": "src",
+  "testsDir": "tests"
+}

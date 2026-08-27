@@ -24,6 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN userdel -r node 2>/dev/null || true; \
     groupadd -g 1000 agent && useradd -u 1000 -g agent -m agent
 
+# In-container agent runtime. `undici` gives a proxy-aware fetch (Node 22's global
+# fetch ignores HTTP(S)_PROXY). Installed at build time; the rootfs is read-only at
+# run time. Node builtins + this one dep, nothing else.
+COPY agent/ /opt/agent/
+RUN cd /opt/agent && npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+
 COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
 RUN chmod +x /usr/local/bin/agent-entrypoint.sh
 

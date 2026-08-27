@@ -1,11 +1,11 @@
 /**
- * Entry point. Phase 1 has no orchestrator loop yet — this just exposes the
- * provisioning layer's maintenance helper so orphaned sub-agent containers/networks
- * from a crashed run can be swept.
+ * Entry point. There is no orchestrator loop yet — this exposes the provisioning
+ * layer directly for manual runs and maintenance.
  *
  *   npm run dev -- --reap
+ *   npm run dev -- --engineer <projectPath> "<task text>"
  */
-import { createLocalProvisioningDeps, reap } from './provisioning.js';
+import { createLocalProvisioningDeps, reap, spinUpAgent } from './provisioning.js';
 
 async function main(argv: string[]): Promise<void> {
   if (argv.includes('--reap')) {
@@ -14,7 +14,26 @@ async function main(argv: string[]): Promise<void> {
     console.log(`reaped ${containers} container(s), ${networks} network(s)`);
     return;
   }
-  console.log('agent-orchestrator: provisioning layer ready (Phase 1). Try: --reap');
+
+  const i = argv.indexOf('--engineer');
+  if (i !== -1) {
+    const projectPath = argv[i + 1];
+    const task = argv[i + 2];
+    if (!projectPath || !task) {
+      throw new Error('usage: --engineer <projectPath> "<task text>"');
+    }
+    const deps = await createLocalProvisioningDeps();
+    const result = await spinUpAgent({ role: 'engineer', task: { task }, projectPath }, deps);
+    console.log(`\nstatus:     ${result.status}`);
+    console.log(`iterations: ${result.iterations ?? '-'}`);
+    console.log(`summary:    ${result.summary}`);
+    console.log(`artifacts:  ${result.outputDir}`);
+    console.log(result.diff ? `\n${result.diff}` : '\n(no changes)');
+    if (result.status !== 'completed') process.exitCode = 1;
+    return;
+  }
+
+  console.log('agent-orchestrator: provisioning layer ready. Try: --reap | --engineer <path> "<task>"');
 }
 
 main(process.argv.slice(2)).catch((err) => {

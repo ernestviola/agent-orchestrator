@@ -67,8 +67,26 @@ export interface TaskSpec {
 export interface SpinUpParams {
   role: Role;
   task: TaskSpec;
+  /**
+   * Orchestrator-local path to the target project root (the repo the sub-agent works
+   * on). Must contain an `orq-project.json` manifest. Defaults to the orchestrator's
+   * own `/workspace` (self-resolved) when omitted.
+   */
+  projectPath?: string;
+  /** Override the model id from `selectModel()` / the `ORQ_MODEL` env default. */
+  model?: string;
   /** Wall-clock limit for the sub-agent container. Defaults to `DEFAULT_TIMEOUT_MS`. */
   timeoutMs?: number;
+}
+
+/** Shape of a target project's `orq-project.json`. */
+export interface ProjectManifest {
+  /** Command the sub-agent runs to check its work, from the project root. */
+  testCmd: string;
+  /** Source dir relative to the project root (mounted read-write for the engineer). */
+  srcDir: string;
+  /** Tests dir relative to the project root. */
+  testsDir: string;
 }
 
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -90,7 +108,16 @@ export interface AgentResult {
   exitCode: number | null;
   /** Short human-readable summary the sub-agent wrote into `out/status.json`. */
   summary: string;
-  /** Orchestrator-local path to the retrieved output artifacts. */
+  /**
+   * Unified diff of the sub-agent's working copy of `src/` against the original
+   * target `src/`. Empty string when nothing changed. This is the reviewable artifact
+   * the human approval gate will consume.
+   */
+  diff: string;
+  /** How many agent loop iterations ran (from `out/status.json`), when reported. */
+  iterations?: number;
+  /** Orchestrator-local path to the retrieved output artifacts (`status.json`,
+   *  `diff.patch`, `agent.log`, `container.log`). */
   outputDir: string;
   startedAt: string;
   finishedAt: string;
@@ -105,31 +132,44 @@ export interface RunContext {
   finishedAt: string;
 }
 
+/** Options passed to `ResultStore.prepare` — everything it needs to stage a run's
+ *  inputs (the working copy of the target project) alongside the in/out dirs. */
+export interface PrepareOptions {
+  /** Orchestrator-local path to the target project root. */
+  projectPath: string;
+  manifest: ProjectManifest;
+}
+
 export interface PreparedRun {
   /** Read/write these from the orchestrator process. */
   inDir: string;
   outDir: string;
+  /** Staged working copy of the target project (`workDir/src`, `workDir/tests`). The
+   *  sub-agent edits this copy, never the real target. */
+  workDir: string;
   /**
    * Bind-mount sources to hand to the container runtime. The container runtime here
    * talks to the *host* Docker daemon, so these are host-absolute paths, which are
-   * not the same as `inDir` / `outDir` when the orchestrator itself runs in a
-   * container. A cloud `ResultStore` would leave this undefined and inject the task
-   * / collect the result by another mechanism.
+   * not the same as `inDir` / `outDir` / `workDir` when the orchestrator itself runs
+   * in a container. A cloud `ResultStore` would leave this undefined and stage /
+   * collect by another mechanism (a volume, object storage).
    */
-  mountSources?: { inDir: string; outDir: string };
+  mountSources?: { inDir: string; outDir: string; workDir: string };
 }
 
 /**
  * The explicit result-handoff contract. `spinUpAgent` writes the task via `prepare`
  * and retrieves output via `finalize` — it never reads a shared mount directly.
  *
- * - Local (Phase 1): `prepare` makes `.orchestrator-runs/<id>/{in,out}`; `finalize`
- *   reads `out/status.json` and enumerates artifacts.
- * - Cloud (later): `prepare` allocates an object-storage prefix; `finalize` fetches
- *   the sub-agent's return payload. `spinUpAgent`'s signature does not change.
+ * - Local: `prepare` makes `.orchestrator-runs/<id>/{in,out,work}` and copies the
+ *   target `src/`+`tests/` into `work/`; `finalize` reads `out/status.json` and diffs
+ *   `work/src` against the original.
+ * - Cloud (later): `prepare` allocates a volume / object-storage prefix and seeds it;
+ *   `finalize` fetches the sub-agent's return payload. `spinUpAgent`'s signature does
+ *   not change.
  */
 export interface ResultStore {
-  prepare(runId: string): Promise<PreparedRun>;
+  prepare(runId: string, opts: PrepareOptions): Promise<PreparedRun>;
   finalize(runId: string, ctx: RunContext): Promise<AgentResult>;
   cleanup(runId: string): Promise<void>;
 }

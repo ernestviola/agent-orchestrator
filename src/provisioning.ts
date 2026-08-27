@@ -10,28 +10,39 @@
  *     reads a shared mount directly — so a cloud backend can replace the local
  *     implementation without changing the interface.
  *
- * Phase 1 scope: the lifecycle only. The "agent process" inside the container is the
- * stub in `sandbox/agent-entrypoint.sh`; there is no orchestrator or model routing.
+ * Scope: the container lifecycle plus staging a per-run working copy of the target
+ * project and returning a diff. The in-container agent runtime (`sandbox/agent.mjs`)
+ * is wired for the engineer role only; there is no orchestrator loop yet.
  */
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 
 import Docker from 'dockerode';
 
+import { selectModel } from './models.js';
 import { getRoleProfile } from './roles.js';
 import {
   DEFAULT_TIMEOUT_MS,
   type AgentResult,
   type AgentStatus,
+  type PrepareOptions,
   type PreparedRun,
+  type ProjectManifest,
   type ResultStore,
   type Role,
   type RoleProfile,
   type RunContext,
   type SpinUpParams,
 } from './types.js';
+
+const execFileAsync = promisify(execFile);
+
+const DEFAULT_MAX_ITERS = 3;
+const MANIFEST_FILE = 'orq-project.json';
 
 const PROXY_ALIAS = 'proxy';
 const PROXY_PORT = 8888;
@@ -82,6 +93,9 @@ export async function resolveProjectHostPath(docker: Docker): Promise<string> {
 // --------------------------------------------------------------------------------------
 
 export class LocalResultStore implements ResultStore {
+  /** Per-run staging context needed again at `finalize` time (to diff the working copy). */
+  private readonly runs = new Map<string, PrepareOptions>();
+
   /**
    * @param localRoot  `.orchestrator-runs` as seen by this process.
    * @param hostRoot   `.orchestrator-runs` as the host Docker daemon sees it.
@@ -91,44 +105,71 @@ export class LocalResultStore implements ResultStore {
     private readonly hostRoot: string,
   ) {}
 
-  async prepare(runId: string): Promise<PreparedRun> {
-    const inDir = path.join(this.localRoot, runId, 'in');
-    const outDir = path.join(this.localRoot, runId, 'out');
+  async prepare(runId: string, opts: PrepareOptions): Promise<PreparedRun> {
+    const runRoot = path.join(this.localRoot, runId);
+    const inDir = path.join(runRoot, 'in');
+    const outDir = path.join(runRoot, 'out');
+    const workDir = path.join(runRoot, 'work');
     await fs.mkdir(inDir, { recursive: true });
     await fs.mkdir(outDir, { recursive: true });
-    // The non-root `agent` user inside the sub-agent writes results here. This is a
-    // throwaway per-run directory, so a permissive mode is acceptable.
+    await fs.mkdir(workDir, { recursive: true });
+
+    // Stage a working copy of the target project — the sub-agent edits this, never
+    // the real target. This is also the seam a cloud backend replaces with "seed a
+    // volume / object-storage prefix the remote worker reads".
+    const origSrc = path.join(opts.projectPath, opts.manifest.srcDir);
+    const origTests = path.join(opts.projectPath, opts.manifest.testsDir);
+    await fs.cp(origSrc, path.join(workDir, 'src'), { recursive: true });
+    await fs.cp(origTests, path.join(workDir, 'tests'), { recursive: true });
+
+    // The non-root `agent` user (uid 1000) inside the sub-agent must be able to write
+    // its edits and its result. Throwaway per-run dirs, so a permissive mode is fine.
     await fs.chmod(outDir, 0o777);
+    await execFileAsync('chmod', ['-R', 'a+rwX', path.join(workDir, 'src')]);
+
+    this.runs.set(runId, opts);
     return {
       inDir,
       outDir,
+      workDir,
       mountSources: {
         inDir: path.posix.join(this.hostRoot, runId, 'in'),
         outDir: path.posix.join(this.hostRoot, runId, 'out'),
+        workDir: path.posix.join(this.hostRoot, runId, 'work'),
       },
     };
   }
 
   async finalize(runId: string, ctx: RunContext): Promise<AgentResult> {
-    const outDir = path.join(this.localRoot, runId, 'out');
+    const runRoot = path.join(this.localRoot, runId);
+    const outDir = path.join(runRoot, 'out');
     let status: AgentStatus = ctx.status;
     let summary = '';
+    let iterations: number | undefined;
     try {
       const parsed = JSON.parse(await fs.readFile(path.join(outDir, 'status.json'), 'utf8')) as {
         summary?: unknown;
+        iterations?: unknown;
       };
       summary = typeof parsed.summary === 'string' ? parsed.summary : '';
+      if (typeof parsed.iterations === 'number') iterations = parsed.iterations;
     } catch {
       // Exited cleanly but produced no readable result — that is a failure.
       if (status === 'completed') status = 'failed';
     }
     if (!summary) summary = '(no status.json produced by the sub-agent)';
+
+    const diff = await this.computeDiff(runId, runRoot);
+    await fs.writeFile(path.join(outDir, 'diff.patch'), diff).catch(() => undefined);
+
     return {
       runId,
       role: ctx.role,
       status,
       exitCode: ctx.exitCode,
       summary,
+      diff,
+      iterations,
       outputDir: outDir,
       startedAt: ctx.startedAt,
       finishedAt: ctx.finishedAt,
@@ -136,7 +177,32 @@ export class LocalResultStore implements ResultStore {
   }
 
   async cleanup(runId: string): Promise<void> {
+    this.runs.delete(runId);
     await fs.rm(path.join(this.localRoot, runId), { recursive: true, force: true });
+  }
+
+  /** Unified diff of the working copy of `src/` vs the original target `src/`. */
+  private async computeDiff(runId: string, runRoot: string): Promise<string> {
+    const opts = this.runs.get(runId);
+    if (!opts) return '';
+    const origSrc = path.join(opts.projectPath, opts.manifest.srcDir);
+    const workSrc = path.join(runRoot, 'work', 'src');
+    try {
+      // The orchestrator diffing two local dirs — not a sub-agent git operation.
+      const { stdout } = await execFileAsync('git', [
+        'diff',
+        '--no-index',
+        '--src-prefix=a/',
+        '--dst-prefix=b/',
+        origSrc,
+        workSrc,
+      ]);
+      return stdout; // exit 0: identical
+    } catch (err) {
+      const e = err as { code?: number; stdout?: string };
+      if (e.code === 1) return e.stdout ?? ''; // exit 1: differences (expected)
+      throw err; // exit >=2: real failure
+    }
   }
 }
 
@@ -172,7 +238,9 @@ export interface AgentCreateArgs {
   profile: RoleProfile;
   sandboxImage: string;
   runId: string;
-  hostProjectPath: string;
+  /** Host path of the staged working copy (`.orchestrator-runs/<id>/work`). Role
+   *  mounts (`src`, `tests`) resolve against this, not the real target. */
+  hostWorkspacePath: string;
   mountSources: { inDir: string; outDir: string };
   /** `'none'` for a no-network role, otherwise the per-run internal network name. */
   networkMode: string;
@@ -184,10 +252,10 @@ export interface AgentCreateArgs {
  * synchronous so tests can assert the role → HostConfig mapping exactly.
  */
 export function buildAgentCreateOptions(args: AgentCreateArgs): Docker.ContainerCreateOptions {
-  const { profile, mountSources, hostProjectPath } = args;
+  const { profile, mountSources, hostWorkspacePath } = args;
   const binds = [
     ...profile.mounts.map(
-      (m) => `${path.posix.join(hostProjectPath, m.hostSubpath)}:${m.containerPath}:${m.mode}`,
+      (m) => `${path.posix.join(hostWorkspacePath, m.hostSubpath)}:${m.containerPath}:${m.mode}`,
     ),
     `${mountSources.inDir}:/task:ro`,
     `${mountSources.outDir}:/out:rw`,
@@ -236,7 +304,10 @@ export async function spinUpAgent(
   await assertImageExists(docker, sandboxImage);
   if (profile.network === 'proxy') await assertImageExists(docker, proxyImage);
 
-  const prepared = await store.prepare(runId);
+  const projectPath = params.projectPath ?? process.cwd();
+  const manifest = await loadManifest(projectPath);
+
+  const prepared = await store.prepare(runId, { projectPath, manifest });
   if (!prepared.mountSources) {
     throw new Error(
       'local provisioning requires ResultStore.prepare() to return mountSources (host bind paths)',
@@ -251,7 +322,28 @@ export async function spinUpAgent(
     )}\n`,
   );
 
-  const hostProjectPath = await resolveProjectHostPath(docker);
+  // Resolve model credentials up front so a missing key fails before any Docker
+  // resources are created. OPENROUTER_API_KEY is a *model* credential — explicitly
+  // NOT the git-credential boundary (docs/DESIGN.md). Never log `modelEnv` / `env`.
+  let modelEnv: string[] = [];
+  if (profile.network === 'proxy') {
+    const route = selectModel(role, params.model);
+    const apiKey = process.env[route.apiKeyEnv];
+    if (!apiKey) {
+      throw new Error(
+        `${route.apiKeyEnv} is not set — the ${role} sub-agent needs it to reach the model. ` +
+          `Add it to .env.local.`,
+      );
+    }
+    modelEnv = [
+      `${route.apiKeyEnv}=${apiKey}`,
+      `ORQ_MODEL=${route.model}`,
+      `ORQ_MODEL_BASE_URL=${route.baseUrl}`,
+      `ORQ_TEST_CMD=${manifest.testCmd}`,
+      `ORQ_MAX_ITERS=${DEFAULT_MAX_ITERS}`,
+    ];
+  }
+
   const startedAt = new Date().toISOString();
   const res: RunResources = {};
   let status: AgentStatus = 'failed';
@@ -293,6 +385,7 @@ export async function spinUpAgent(
         `https_proxy=${url}`,
         'NO_PROXY=localhost,127.0.0.1',
         'no_proxy=localhost,127.0.0.1',
+        ...modelEnv,
       );
     }
 
@@ -301,7 +394,7 @@ export async function spinUpAgent(
         profile,
         sandboxImage,
         runId,
-        hostProjectPath,
+        hostWorkspacePath: prepared.mountSources.workDir,
         mountSources: prepared.mountSources,
         networkMode,
         env,
@@ -381,6 +474,23 @@ export async function reap(deps: ProvisioningDeps): Promise<{ containers: number
 
 function newRunId(): string {
   return `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+}
+
+async function loadManifest(projectPath: string): Promise<ProjectManifest> {
+  const file = path.join(projectPath, MANIFEST_FILE);
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, 'utf8');
+  } catch (cause) {
+    throw new Error(`target project has no ${MANIFEST_FILE} at ${projectPath}`, { cause });
+  }
+  const parsed = JSON.parse(raw) as Partial<ProjectManifest>;
+  for (const key of ['testCmd', 'srcDir', 'testsDir'] as const) {
+    if (typeof parsed[key] !== 'string' || !parsed[key]) {
+      throw new Error(`${MANIFEST_FILE} is missing a valid "${key}"`);
+    }
+  }
+  return parsed as ProjectManifest;
 }
 
 async function assertImageExists(docker: Docker, image: string): Promise<void> {
