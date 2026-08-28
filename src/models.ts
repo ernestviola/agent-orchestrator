@@ -8,7 +8,7 @@
 import type { Role } from './types.js';
 
 export interface ModelRoute {
-  /** OpenRouter model id, e.g. `"anthropic/claude-3.5-haiku"`. */
+  /** OpenRouter model id, e.g. `"anthropic/claude-haiku-4.5"`. */
   model: string;
   /** OpenAI-compatible base URL. */
   baseUrl: string;
@@ -17,7 +17,7 @@ export interface ModelRoute {
   apiKeyEnv: string;
 }
 
-export const DEFAULT_MODEL = 'anthropic/claude-3.5-haiku';
+export const DEFAULT_MODEL = 'anthropic/claude-haiku-4.5';
 export const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 export const API_KEY_ENV = 'OPENROUTER_API_KEY';
 
