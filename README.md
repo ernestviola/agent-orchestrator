@@ -32,6 +32,94 @@ read-only / read-write mounts, and **never** any git credential. See `docs/DESIG
 | `fixtures/sample-project/` | Dependency-free target project (failing tests) for the engineer / test-engineer slices |
 | `tests/` | Unit + integration tests, mirroring `src/` |
 
+## Using the orchestrator
+
+### Prerequisites
+
+1. Run inside the devcontainer (needs the mounted Docker socket and the `/workspace` bind mount).
+2. `OPENROUTER_API_KEY` in `.env.local` — a *model* credential, not the git-credential boundary.
+   Restart the devcontainer after adding it (compose reads `env_file` only at container start).
+   Optionally set `ORQ_ORCHESTRATOR_MODEL` (orchestrator LLM) and `ORQ_MODEL` (sub-agents);
+   both default to `anthropic/claude-haiku-4.5`.
+3. Build the sub-agent images once (rebuild after changing anything under `sandbox/`):
+
+   ```sh
+   npm run sandbox:build
+   ```
+
+4. A **target project** to work on. It must:
+   - live inside `/workspace` (only in-repo paths are wired),
+   - have an `orq-project.json` at its root: `{ "testCmd": "...", "srcDir": "src", "testsDir": "tests" }`,
+   - be **dependency-free** — the sandbox has no writable `node_modules` yet, so the target's
+     `testCmd` has to run without an install step. `fixtures/sample-project/` is the known-good one.
+
+### Start a session
+
+```sh
+npm run dev -- --orchestrate <path-to-target-project>
+# e.g.
+npm run dev -- --orchestrate fixtures/sample-project
+```
+
+You get a `>` prompt. Describe what you want built in plain language. An LLM plans with you and
+delegates scoped tasks to sub-agents through a single `spin_up_agent(role, task, context?)`
+tool — it never runs code or shells out itself. Type `exit` (or Ctrl-D) to quit.
+
+### Walkthrough
+
+```
+$ npm run dev -- --orchestrate fixtures/sample-project
+orchestrator ready (model: anthropic/claude-haiku-4.5, target: fixtures/sample-project).
+Describe what you want built. Ctrl-D or "exit" to quit.
+
+> Add a test that fizzbuzz(-3) returns "Fizz", and once I approve it, implement it so every test passes.
+
+─────────────── HUMAN APPROVAL GATE ───────────────
+test-engineer run mtcb9oip-2c3b7c73 — completed
+summary: Added test asserting that fizzbuzz(-3) returns 'Fizz'
+<unified diff of the drafted tests>
+───────────────────────────────────────────────────
+Approve these drafted tests for the engineer? [y/N] y
+approved — tests locked.
+
+<the engineer runs against the locked tests and the orchestrator reports back>
+
+> exit
+bye
+```
+
+### The approval gate
+
+- After every **completed** `test-engineer` run, the CLI shows you the drafted tests as a diff
+  and asks for approval. `y` / `yes` locks them; anything else rejects.
+- A `spin_up_agent` call for `role: "engineer"` is **refused in code** (in the tool handler,
+  not by asking the model nicely) until a test-engineer run this session has been approved.
+- If you're implementing against tests you wrote yourself, just say so — with no test-engineer
+  run in the session the orchestrator goes straight to the engineer.
+- Re-running the test-engineer re-opens the gate until you approve the new set.
+- Answering the gate prompt with EOF (Ctrl-D) counts as **not approved**.
+
+### Getting the changes out
+
+Sub-agents edit a **working copy** — your real files are never touched and nothing is committed.
+Each run's artifacts land in `.orchestrator-runs/<run-id>/out/` (`status.json`, `diff.patch`,
+`agent.log`). To apply a change you review its diff and commit it yourself. (Auto-applying an
+approved diff is a follow-up.)
+
+### Driving one sub-agent directly (no planning, no gate)
+
+Handy for development — skips the orchestrator entirely:
+
+```sh
+npm run dev -- --engineer      fixtures/sample-project "Implement fizzbuzz so the tests pass"
+npm run dev -- --test-engineer fixtures/sample-project "Add tests asserting fizzbuzz coerces its output to a string"
+npm run dev -- --reap          # clean up orphaned containers / networks
+```
+
+`--engineer` edits `src/` and loops until `testCmd` passes; `--test-engineer` edits `tests/`
+once (its drafted tests are expected to fail until an engineer implements the code). The
+printed result includes a diff; the real project on disk is never modified.
+
 ## Development
 
 ```sh
@@ -42,36 +130,6 @@ npm test                   # unit tests (tests/*.test.ts) — dockerode mocked, 
 npm run sandbox:build      # build the sub-agent + proxy images (orq-sandbox:dev, orq-proxy:dev)
 npm run test:integration   # integration tests (tests/*.integration.test.ts) — real Docker; run sandbox:build first
 ```
-
-Requires `OPENROUTER_API_KEY` in `.env.local` (a *model* credential — not the git-credential
-boundary). Optionally set `ORQ_MODEL` (sub-agents, default `anthropic/claude-haiku-4.5`) and
-`ORQ_ORCHESTRATOR_MODEL` (orchestrator LLM, same default).
-
-### The orchestrator loop
-
-```sh
-npm run sandbox:build
-npm run dev -- --orchestrate fixtures/sample-project
-```
-
-Starts a REPL: describe what you want built, and an LLM plans with you and delegates to
-sub-agents via a single `spin_up_agent(role, task)` tool. After any `test-engineer` run the
-CLI shows you the drafted tests and asks for approval; an `engineer` spin-up is **mechanically
-refused** until that approval is given (enforced in the tool handler, not the prompt). Nothing
-is committed — that's your step. Only dependency-free target projects work for now (see
-`docs/CONTEXT.md` → self-hosting §2).
-
-### Run one sub-agent directly (no planning, no gate)
-
-```sh
-npm run dev -- --engineer      fixtures/sample-project "Implement fizzbuzz so the tests pass"
-npm run dev -- --test-engineer fixtures/sample-project "Add tests asserting fizzbuzz coerces its output to a string"
-```
-
-A hardened container is provisioned and a model edits a *working copy* of the project:
-`--engineer` edits `src/` and loops until `node --test` passes; `--test-engineer` edits
-`tests/` once (its drafted tests are expected to fail until an engineer implements the code).
-The printed result includes a diff; the real `fixtures/sample-project/` on disk is never modified.
 
 ## Status
 
