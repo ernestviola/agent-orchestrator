@@ -60,5 +60,6 @@ Do not modify any of the following without explicit confirmation from the user:
 
 - Branch naming: `type/short-description` (e.g. `feat/spin-up-agent`, `fix/mount-config`)
 - Commits: conventional commits format (`feat:`, `fix:`, `chore:`, `docs:`, etc.)
+- Do not add `Co-Authored-By: Claude` / `Claude-Session:` trailers to commit messages, and keep AI-tool boilerplate out of PR descriptions.
 - Every AI-assisted change gets logged in `docs/CHANGES.md` after review
 - Direct pushes to `main` are currently allowed (quality gate is warn-only on all branches, including `main`, as a deliberate temporary relaxation for early-stage development on this first project — see `docs/CONTEXT.md` for status). Revisit before this project has real stakes or other contributors.
