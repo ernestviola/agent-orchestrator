@@ -25,6 +25,8 @@ read-only / read-write mounts, and **never** any git credential. See `docs/DESIG
 | `src/types.ts` | Shared types + the sub-agent result-handoff contract (`ResultStore`, `AgentResult`) |
 | `src/roles.ts` | Role mount/permission profiles — the security boundary between sub-agent roles |
 | `src/provisioning.ts` | `spinUpAgent` / `tearDownAgent` — dockerode-based container lifecycle + per-run working-copy staging |
+| `src/orchestrator.ts` | The orchestrator loop — LLM tool-use over `spin_up_agent`, with the human approval gate enforced in the tool handler |
+| `src/llm.ts` | OpenAI-compatible chat client for the orchestrator (trusted tier, direct egress) |
 | `src/models.ts` | Per-task model routing (OpenRouter, OpenAI-compatible) |
 | `sandbox/` | Sub-agent container assets (image, egress proxy, in-container agent runtime). Ported from [`ai-dev-template`](https://github.com/ernestviola/ai-dev-template); see `sandbox/README.md` |
 | `fixtures/sample-project/` | Dependency-free target project (failing tests) for the engineer / test-engineer slices |
@@ -41,25 +43,39 @@ npm run sandbox:build      # build the sub-agent + proxy images (orq-sandbox:dev
 npm run test:integration   # integration tests (tests/*.integration.test.ts) — real Docker; run sandbox:build first
 ```
 
-### Run one sub-agent task against a real model
-
 Requires `OPENROUTER_API_KEY` in `.env.local` (a *model* credential — not the git-credential
-boundary). Optionally set `ORQ_MODEL` (default `anthropic/claude-haiku-4.5`).
+boundary). Optionally set `ORQ_MODEL` (sub-agents, default `anthropic/claude-haiku-4.5`) and
+`ORQ_ORCHESTRATOR_MODEL` (orchestrator LLM, same default).
+
+### The orchestrator loop
 
 ```sh
 npm run sandbox:build
+npm run dev -- --orchestrate fixtures/sample-project
+```
+
+Starts a REPL: describe what you want built, and an LLM plans with you and delegates to
+sub-agents via a single `spin_up_agent(role, task)` tool. After any `test-engineer` run the
+CLI shows you the drafted tests and asks for approval; an `engineer` spin-up is **mechanically
+refused** until that approval is given (enforced in the tool handler, not the prompt). Nothing
+is committed — that's your step. Only dependency-free target projects work for now (see
+`docs/CONTEXT.md` → self-hosting §2).
+
+### Run one sub-agent directly (no planning, no gate)
+
+```sh
 npm run dev -- --engineer      fixtures/sample-project "Implement fizzbuzz so the tests pass"
 npm run dev -- --test-engineer fixtures/sample-project "Add tests asserting fizzbuzz coerces its output to a string"
 ```
 
 A hardened container is provisioned and a model edits a *working copy* of the project:
 `--engineer` edits `src/` and loops until `node --test` passes; `--test-engineer` edits
-`tests/` once (its drafted tests are expected to fail until an engineer implements the code —
-the human approval gate, not a green run, is what judges them). Either way the printed result
-includes a diff, and the real `fixtures/sample-project/` on disk is never modified.
+`tests/` once (its drafted tests are expected to fail until an engineer implements the code).
+The printed result includes a diff; the real `fixtures/sample-project/` on disk is never modified.
 
 ## Status
 
-The provisioning layer and the **engineer** + **test-engineer** slices (one task, end to end,
-with a real model) work. No orchestrator LLM / planning loop, no reviewer runtime, no human
-approval gate yet — see `docs/CONTEXT.md`.
+The provisioning layer, the **engineer** + **test-engineer** slices, and the **orchestrator
+loop + human approval gate** work end to end with a real model. No **reviewer** runtime yet,
+and the orchestrator can only target dependency-free projects until writable-deps sandbox
+support lands — see `docs/CONTEXT.md`.
