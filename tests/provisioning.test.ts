@@ -204,6 +204,24 @@ describe('LocalResultStore', () => {
     expect(await fs.readFile(path.join(p.outDir, 'diff.patch'), 'utf8')).toBe(r.diff);
   });
 
+  it('finalize returns a unified diff when the working copy of tests/ changed', async () => {
+    const store = new LocalResultStore(root, '/host');
+    const p = await store.prepare('run8c', prepOpts());
+    await fs.writeFile(path.join(p.workDir, 'tests', 'a.test.mjs'), '// new assertions\n');
+    await fs.writeFile(path.join(p.outDir, 'status.json'), JSON.stringify({ summary: 's' }));
+    const r = await store.finalize('run8c', {
+      role: 'test-engineer',
+      status: 'completed',
+      exitCode: 0,
+      startedAt: 'a',
+      finishedAt: 'b',
+    });
+    expect(r.diff).toMatch(/a\.test\.mjs/);
+    expect(r.diff).toMatch(/-\/\/ t/);
+    expect(r.diff).toMatch(/\+\/\/ new assertions/);
+    expect(await fs.readFile(path.join(p.outDir, 'diff.patch'), 'utf8')).toBe(r.diff);
+  });
+
   it('finalize downgrades a clean exit to "failed" when no status.json was produced', async () => {
     const store = new LocalResultStore(root, '/host');
     await store.prepare('run9', prepOpts());
@@ -395,6 +413,33 @@ describe('spinUpAgent', () => {
     expect(store.finalized).toHaveLength(1);
     expect(store.finalized[0]).toMatchObject({ role: 'engineer', status: 'completed', exitCode: 0 });
     expect(store.cleaned).toEqual([]);
+    expect(result.status).toBe('completed');
+  });
+
+  it('test-engineer: same proxy + internal network + model env wiring as engineer', async () => {
+    const { deps, docker, store, created } = makeDeps(root);
+
+    const result = await spinUpAgent(
+      { role: 'test-engineer', task: { task: 'write tests for fizzbuzz' }, projectPath: FIXTURE },
+      deps,
+    );
+
+    expect(docker.createNetwork).toHaveBeenCalledOnce();
+    const agent = created.find((c) => c.name?.startsWith('orq-agent-'));
+    expect(agent).toBeTruthy();
+
+    const env = envArr(agent!);
+    expect(env).toContain('HTTP_PROXY=http://proxy:8888');
+    expect(env).toContain('OPENROUTER_API_KEY=test-key');
+    expect(env.some((e) => e.startsWith('ORQ_MODEL='))).toBe(true);
+    expect(netMode(agent!)).toMatch(/^orq-/);
+
+    const taskJson = JSON.parse(
+      await fs.readFile(path.join(root, store.prepared[0]!, 'in', 'task.json'), 'utf8'),
+    );
+    expect(taskJson).toMatchObject({ role: 'test-engineer', task: 'write tests for fizzbuzz' });
+
+    expect(store.finalized[0]).toMatchObject({ role: 'test-engineer', status: 'completed' });
     expect(result.status).toBe('completed');
   });
 

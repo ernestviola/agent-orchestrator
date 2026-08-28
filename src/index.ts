@@ -4,8 +4,13 @@
  *
  *   npm run dev -- --reap
  *   npm run dev -- --engineer <projectPath> "<task text>"
+ *   npm run dev -- --test-engineer <projectPath> "<task text>"
  */
 import { createLocalProvisioningDeps, reap, spinUpAgent } from './provisioning.js';
+import type { Role } from './types.js';
+
+/** Roles with an in-container runtime that this CLI can drive directly. */
+const RUNNABLE_ROLES = ['engineer', 'test-engineer'] as const satisfies readonly Role[];
 
 async function main(argv: string[]): Promise<void> {
   if (argv.includes('--reap')) {
@@ -15,16 +20,19 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  const i = argv.indexOf('--engineer');
-  if (i !== -1) {
+  for (const role of RUNNABLE_ROLES) {
+    const i = argv.indexOf(`--${role}`);
+    if (i === -1) continue;
+
     const projectPath = argv[i + 1];
     const task = argv[i + 2];
     if (!projectPath || !task) {
-      throw new Error('usage: --engineer <projectPath> "<task text>"');
+      throw new Error(`usage: --${role} <projectPath> "<task text>"`);
     }
     const deps = await createLocalProvisioningDeps();
-    const result = await spinUpAgent({ role: 'engineer', task: { task }, projectPath }, deps);
-    console.log(`\nstatus:     ${result.status}`);
+    const result = await spinUpAgent({ role, task: { task }, projectPath }, deps);
+    console.log(`\nrole:       ${result.role}`);
+    console.log(`status:     ${result.status}`);
     console.log(`iterations: ${result.iterations ?? '-'}`);
     console.log(`summary:    ${result.summary}`);
     console.log(`artifacts:  ${result.outputDir}`);
@@ -33,7 +41,10 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  console.log('agent-orchestrator: provisioning layer ready. Try: --reap | --engineer <path> "<task>"');
+  console.log(
+    'agent-orchestrator: provisioning layer ready. ' +
+      'Try: --reap | --engineer <path> "<task>" | --test-engineer <path> "<task>"',
+  );
 }
 
 main(process.argv.slice(2)).catch((err) => {

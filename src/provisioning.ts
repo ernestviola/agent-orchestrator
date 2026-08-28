@@ -12,7 +12,8 @@
  *
  * Scope: the container lifecycle plus staging a per-run working copy of the target
  * project and returning a diff. The in-container agent runtime (`sandbox/agent.mjs`)
- * is wired for the engineer role only; there is no orchestrator loop yet.
+ * handles the engineer and test-engineer roles; the reviewer runtime and the
+ * orchestrator loop are not built yet.
  */
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -124,8 +125,10 @@ export class LocalResultStore implements ResultStore {
 
     // The non-root `agent` user (uid 1000) inside the sub-agent must be able to write
     // its edits and its result. Throwaway per-run dirs, so a permissive mode is fine.
+    // The whole working copy is opened up: which subtree is actually writable is
+    // decided by the role's bind-mount mode (src/roles.ts), not by these perms.
     await fs.chmod(outDir, 0o777);
-    await execFileAsync('chmod', ['-R', 'a+rwX', path.join(workDir, 'src')]);
+    await execFileAsync('chmod', ['-R', 'a+rwX', workDir]);
 
     this.runs.set(runId, opts);
     return {
@@ -181,12 +184,26 @@ export class LocalResultStore implements ResultStore {
     await fs.rm(path.join(this.localRoot, runId), { recursive: true, force: true });
   }
 
-  /** Unified diff of the working copy of `src/` vs the original target `src/`. */
+  /**
+   * Unified diff of the working copy vs the original target, for both `src/` and
+   * `tests/`. Only the role's writable subtree can actually differ (engineer →
+   * `src/`, test-engineer → `tests/`); the other side contributes an empty string.
+   * The staged working copy always uses the fixed names `src` / `tests` (see
+   * `prepare`), whatever the manifest calls those dirs in the real target.
+   */
   private async computeDiff(runId: string, runRoot: string): Promise<string> {
     const opts = this.runs.get(runId);
     if (!opts) return '';
-    const origSrc = path.join(opts.projectPath, opts.manifest.srcDir);
-    const workSrc = path.join(runRoot, 'work', 'src');
+    const pairs: [orig: string, work: string][] = [
+      [path.join(opts.projectPath, opts.manifest.srcDir), path.join(runRoot, 'work', 'src')],
+      [path.join(opts.projectPath, opts.manifest.testsDir), path.join(runRoot, 'work', 'tests')],
+    ];
+    let out = '';
+    for (const [orig, work] of pairs) out += await this.diffPair(orig, work);
+    return out;
+  }
+
+  private async diffPair(orig: string, work: string): Promise<string> {
     try {
       // The orchestrator diffing two local dirs — not a sub-agent git operation.
       const { stdout } = await execFileAsync('git', [
@@ -194,8 +211,8 @@ export class LocalResultStore implements ResultStore {
         '--no-index',
         '--src-prefix=a/',
         '--dst-prefix=b/',
-        origSrc,
-        workSrc,
+        orig,
+        work,
       ]);
       return stdout; // exit 0: identical
     } catch (err) {

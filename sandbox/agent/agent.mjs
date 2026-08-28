@@ -1,19 +1,30 @@
 #!/usr/bin/env node
 /**
- * In-container agent runtime for the ENGINEER role.
+ * In-container agent runtime for the ENGINEER and TEST-ENGINEER roles.
  *
  * Contract with the provisioning layer (src/provisioning.ts):
  *   - /task/task.json  (ro)  { role, task, context }
- *   - /workspace/src   (rw)  the working copy the agent edits
- *   - /workspace/tests (ro)  read-only context; the agent must not change tests
+ *   - /workspace/src         engineer: rw working copy | test-engineer: ro context
+ *   - /workspace/tests       engineer: ro context      | test-engineer: rw working copy
  *   - /out             (rw)  write status.json + agent.log here, then exit
- *   Exit 0 = tests pass, non-zero = gave up.
+ *   Exit 0 = role goal reached, non-zero = gave up.
+ *
+ * The role's writable dir is enforced by the mount profile (src/roles.ts), not by
+ * this code — a bad path here is a belt-and-braces reject, not the boundary.
  *
  * Deliberately minimal and constrained: the model returns whole-file replacements
- * for files under src/, we apply them and run the project's test command, feeding
- * failures back for up to ORQ_MAX_ITERS turns. No shell access is given to the model.
- * Node built-ins + undici only (undici gives us a proxy-aware fetch; Node 22's global
- * fetch ignores HTTP(S)_PROXY).
+ * for files under the role's writable dir; we apply them and run the project's test
+ * command. No shell access is given to the model. Node built-ins + undici only
+ * (undici gives us a proxy-aware fetch; Node 22's global fetch ignores HTTP(S)_PROXY).
+ *
+ * Role loop shape:
+ *   - engineer      : apply -> run tests -> feed failures back, up to ORQ_MAX_ITERS
+ *                     turns. Success = tests pass.
+ *   - test-engineer : author test files once (retry only an unusable reply). The
+ *                     drafted tests are expected to FAIL against an unimplemented
+ *                     src/, so their pass/fail does not gate completion — the human
+ *                     approval gate downstream judges them (docs/DESIGN.md). We run
+ *                     the test command once anyway and record the outcome.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -36,8 +47,50 @@ const API_KEY = process.env.OPENROUTER_API_KEY;
 const TEST_CMD = process.env.ORQ_TEST_CMD;
 const MAX_ITERS = Math.max(1, Number(process.env.ORQ_MAX_ITERS) || 3);
 
+// Per-role configuration. `writeDir` / `writePrefix` are the ONLY location the model
+// is allowed to write; everything else is read-only context.
+const ROLE_CONFIG = {
+  engineer: {
+    writeDir: SRC_DIR,
+    writePrefix: 'src/',
+    contextDir: TESTS_DIR,
+    contextLabel: 'TEST FILES',
+    writeLabel: 'SOURCE FILES',
+    loop: 'until-tests-pass',
+    systemPrompt:
+      'You are an automated software engineer. You are given a task, the project test ' +
+      'files (READ-ONLY), and the current source files. Edit ONLY files under src/ to ' +
+      'make every test pass. You must not modify tests. Respond with a SINGLE JSON ' +
+      'object and nothing else:\n' +
+      '{"files":[{"path":"src/<relative path>","content":"<complete new file contents>"}],' +
+      '"note":"<one line on what you changed>"}\n' +
+      'Include the full content of every file you change; omit files you do not change.',
+  },
+  'test-engineer': {
+    writeDir: TESTS_DIR,
+    writePrefix: 'tests/',
+    contextDir: SRC_DIR,
+    contextLabel: 'SOURCE FILES',
+    writeLabel: 'TEST FILES',
+    loop: 'author-once',
+    systemPrompt:
+      'You are an automated test engineer. You are given a task describing requirements ' +
+      'and the project source files (READ-ONLY) for interface and context. Write or ' +
+      'update test files under tests/ that capture the requirements as executable ' +
+      'tests. Do NOT implement or change anything under src/ — you only write tests. ' +
+      'The tests you write are EXPECTED TO FAIL until an engineer implements the code; ' +
+      'that is correct. Write specific, meaningful assertions — not tests that pass ' +
+      'trivially. Match the test framework already used in tests/. Respond with a ' +
+      'SINGLE JSON object and nothing else:\n' +
+      '{"files":[{"path":"tests/<relative path>","content":"<complete new file contents>"}],' +
+      '"note":"<one line on what you added>"}\n' +
+      'Include the full content of every test file you write; omit files you do not change.',
+  },
+};
+
 const log = [];
 const dispatcher = new EnvHttpProxyAgent();
+let ROLE = 'engineer';
 
 function note(line) {
   log.push(line);
@@ -50,7 +103,7 @@ function finish({ status, summary, iterations, extra }) {
     mkdirSync(OUT_DIR, { recursive: true });
     writeFileSync(
       path.join(OUT_DIR, 'status.json'),
-      `${JSON.stringify({ status, role: 'engineer', summary, iterations, ...extra }, null, 2)}\n`,
+      `${JSON.stringify({ status, role: ROLE, summary, iterations, ...extra }, null, 2)}\n`,
     );
     writeFileSync(path.join(OUT_DIR, 'agent.log'), `${log.join('\n')}\n`);
   } catch (err) {
@@ -94,25 +147,26 @@ function extractJson(text) {
   return JSON.parse(t.slice(start, end + 1));
 }
 
-function resolveSrcPath(p) {
+function resolveWritePath(p, prefix) {
   const rel = path.posix.normalize(String(p)).replace(/^\/+/, '');
-  if (!rel.startsWith('src/') || rel.split('/').includes('..')) {
-    throw new Error(`refusing to write outside src/: ${p}`);
+  if (!rel.startsWith(prefix) || rel.split('/').includes('..')) {
+    throw new Error(`refusing to write outside ${prefix}: ${p}`);
   }
   return path.join(WORKSPACE, rel);
 }
 
-function applyFiles(files) {
+function applyFiles(files, prefix) {
   const written = [];
   for (const f of files ?? []) {
     if (!f || typeof f.path !== 'string' || typeof f.content !== 'string') {
       throw new Error('each file needs string "path" and "content"');
     }
-    const dest = resolveSrcPath(f.path);
+    const dest = resolveWritePath(f.path, prefix);
     mkdirSync(path.dirname(dest), { recursive: true });
     writeFileSync(dest, f.content);
     written.push(path.relative(WORKSPACE, dest));
   }
+  if (written.length === 0) throw new Error('model returned no files to write');
   return written;
 }
 
@@ -150,6 +204,13 @@ async function callModel(messages) {
 }
 
 async function main() {
+  const task = JSON.parse(readFileSync(TASK_FILE, 'utf8'));
+  ROLE = task.role || 'engineer';
+  const cfg = ROLE_CONFIG[ROLE];
+  if (!cfg) {
+    finish({ status: 'failed', summary: `unsupported role: ${ROLE}`, iterations: 0 });
+  }
+
   for (const [name, val] of [
     ['ORQ_MODEL', MODEL],
     ['ORQ_MODEL_BASE_URL', BASE_URL],
@@ -159,30 +220,17 @@ async function main() {
     if (!val) finish({ status: 'failed', summary: `missing required env ${name}`, iterations: 0 });
   }
 
-  const task = JSON.parse(readFileSync(TASK_FILE, 'utf8'));
-  if (task.role && task.role !== 'engineer') {
-    finish({ status: 'failed', summary: `unsupported role: ${task.role}`, iterations: 0 });
-  }
-  note(`engineer agent: model=${MODEL} maxIters=${MAX_ITERS}`);
-
-  const systemPrompt =
-    'You are an automated software engineer. You are given a task, the project test ' +
-    'files (READ-ONLY), and the current source files. Edit ONLY files under src/ to ' +
-    'make every test pass. You must not modify tests. Respond with a SINGLE JSON ' +
-    'object and nothing else:\n' +
-    '{"files":[{"path":"src/<relative path>","content":"<complete new file contents>"}],' +
-    '"note":"<one line on what you changed>"}\n' +
-    'Include the full content of every file you change; omit files you do not change.';
+  note(`${ROLE} agent: model=${MODEL} maxIters=${MAX_ITERS} loop=${cfg.loop}`);
 
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: cfg.systemPrompt },
     {
       role: 'user',
       content:
         `TASK:\n${task.task}\n\n` +
         (task.context ? `CONTEXT:\n${task.context}\n\n` : '') +
-        `TEST FILES:\n${renderTree(TESTS_DIR, 'read-only')}\n\n` +
-        `SOURCE FILES:\n${renderTree(SRC_DIR, 'editable')}`,
+        `${cfg.contextLabel} (read-only):\n${renderTree(cfg.contextDir, 'read-only')}\n\n` +
+        `${cfg.writeLabel} (you edit these):\n${renderTree(cfg.writeDir, 'editable')}`,
     },
   ];
 
@@ -200,10 +248,10 @@ async function main() {
       continue;
     }
 
-    let parsed;
+    let written;
     try {
-      parsed = extractJson(reply);
-      const written = applyFiles(parsed.files);
+      const parsed = extractJson(reply);
+      written = applyFiles(parsed.files, cfg.writePrefix);
       lastNote = typeof parsed.note === 'string' ? parsed.note : '';
       note(`applied ${written.length} file(s): ${written.join(', ')}${lastNote ? ` — ${lastNote}` : ''}`);
     } catch (err) {
@@ -221,6 +269,29 @@ async function main() {
 
     const { pass, code, output } = runTests();
     note(`tests exit=${code} pass=${pass}`);
+
+    if (cfg.loop === 'author-once') {
+      // The drafted tests are expected to fail against an unimplemented src/. Record
+      // the outcome for the reviewer / human gate, but do not gate on it. `testsPass`
+      // true here is a smell worth surfacing (tests may be trivially satisfiable).
+      finish({
+        status: 'completed',
+        summary:
+          lastNote ||
+          `drafted ${written.length} test file(s)` +
+            (pass ? ' (note: they already pass against the current src/)' : ''),
+        iterations: iter,
+        extra: {
+          note: lastNote,
+          filesWritten: written,
+          testsRan: code !== null,
+          testsPass: pass,
+          testExit: code,
+        },
+      });
+    }
+
+    // engineer: loop until the tests pass.
     if (pass) {
       finish({
         status: 'completed',
