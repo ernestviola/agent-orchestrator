@@ -1,0 +1,1 @@
+placeholder dep payload for the sandboxWritablePaths test

@@ -77,7 +77,7 @@ Because of this, **the provisioning layer's interface must define result handoff
 - Task: given a diff (or the current state of `src/` against `tests/`), assess whether the change plausibly satisfies the unchanged tests and flag anything suspicious (e.g., overly narrow implementation, hardcoded outputs matching only the given test cases).
 - Deliberately has no ability to "fix" anything it flags — it can only report back to the orchestrator or the user.
 
-This role split, plus the human approval gate, is a direct, structural answer to the test-integrity problem: the engineer role is physically incapable of touching `tests/`, the reviewer role is physically incapable of writing anything at all, and the one role that _can_ write tests never gets to hand them straight to implementation without a human in the loop. None of these properties depend on any agent behaving well.
+This role split, plus the human approval gate, is a direct, structural answer to the test-integrity problem: the engineer role gets `tests/` **read-only** (it can read the locked tests and run them to verify, but the mount mode makes modifying or deleting one physically impossible), the reviewer role is physically incapable of writing anything at all, and the one role that _can_ write tests never gets to hand them straight to implementation without a human in the loop. None of these properties depend on any agent behaving well.
 
 ## Model routing
 

@@ -23,10 +23,11 @@ describe('ROLE_PROFILES', () => {
     }
   });
 
-  it('engineer can write src/ and cannot see tests/ at all', () => {
+  it('engineer can write src/ and reads tests/ read-only (cannot modify a test)', () => {
     const p = getRoleProfile('engineer');
     expect(p.mounts.find((m) => m.hostSubpath === 'src')?.mode).toBe('rw');
-    expect(p.mounts.some((m) => m.hostSubpath === 'tests')).toBe(false);
+    expect(p.mounts.find((m) => m.hostSubpath === 'tests')?.mode).toBe('ro');
+    expect(p.mounts.some((m) => m.hostSubpath === 'tests' && m.mode === 'rw')).toBe(false);
   });
 
   it('test-engineer can write tests/ but only reads src/', () => {
@@ -49,10 +50,10 @@ describe('ROLE_PROFILES', () => {
 });
 
 describe('assertProfileInvariants (backstop against edits)', () => {
-  it('throws if engineer is given a tests/ mount', () => {
+  it('throws if engineer is given a read-write tests/ mount (read-only is allowed)', () => {
     const bad = { ...ROLE_PROFILES, engineer: clone(ROLE_PROFILES.engineer) };
-    bad.engineer.mounts.push({ hostSubpath: 'tests', containerPath: '/workspace/tests', mode: 'ro' });
-    expect(() => assertProfileInvariants(bad)).toThrow(/engineer must not mount tests/);
+    bad.engineer.mounts.push({ hostSubpath: 'tests', containerPath: '/workspace/tests', mode: 'rw' });
+    expect(() => assertProfileInvariants(bad)).toThrow(/engineer must not mount tests\/ read-write/);
   });
 
   it('throws if reviewer is given a read-write mount', () => {

@@ -29,6 +29,7 @@ import {
 const SANDBOX_IMAGE = 'orq-sandbox:dev';
 const PROXY_IMAGE = 'orq-proxy:dev';
 const SAMPLE_PROJECT = path.join(process.cwd(), 'fixtures', 'sample-project');
+const NODE_RUNTIME_PROJECT = path.join(process.cwd(), 'fixtures', 'node-runtime-project');
 const HAVE_KEY = !!process.env.OPENROUTER_API_KEY;
 
 let deps: ProvisioningDeps;
@@ -176,6 +177,30 @@ describe('spinUpAgent against real Docker', () => {
       const after = await labeledCount();
       expect(after.containers).toBe(before.containers);
       expect(after.networks).toBe(before.networks);
+    },
+    180_000,
+  );
+
+  it.skipIf(!HAVE_KEY)(
+    'engineer: a target with sandboxReadonlyPaths + sandboxWritablePaths runs its testCmd and completes',
+    async () => {
+      const result = await spinUpAgent(
+        {
+          role: 'engineer',
+          task: {
+            task: 'Add a JSDoc comment above the greet function in src/greet.mjs. Keep every test passing.',
+          },
+          projectPath: NODE_RUNTIME_PROJECT,
+        },
+        deps,
+      );
+      runsToClean.push(result.runId);
+
+      expect(result.status).toBe('completed');
+      // the sub-agent actually ran the target's test command (not a vacuous no-test pass)
+      const log = await fs.readFile(path.join(result.outputDir, 'agent.log'), 'utf8');
+      expect(log).toMatch(/tests exit=0 pass=true/);
+      expect(result.diff).toMatch(/greet\.mjs/);
     },
     180_000,
   );

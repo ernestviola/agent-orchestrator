@@ -5,8 +5,11 @@
  * engineer-role or reviewer-role sub-agent can access.
  *
  * Design intent enforced structurally, not by agent good behaviour:
- *   - `engineer` is physically incapable of touching `tests/` — `tests/` is not in
- *     its mount list at all.
+ *   - `engineer` is physically incapable of *modifying* `tests/` — it is mounted
+ *     read-only (so the engineer can read the locked tests as context and run them
+ *     to verify its work, but cannot weaken or delete one). docs/DESIGN.md → Roles
+ *     sanctions this ("tests/ ... mounted read-only if the task genuinely needs to
+ *     read (not modify)").
  *   - `reviewer` is physically incapable of writing anything — every mount is `ro`
  *     and it has no network.
  *   - `test-engineer` can write `tests/` but only sees `src/` read-only.
@@ -41,8 +44,9 @@ export const ROLE_PROFILES: Record<Role, RoleProfile> = {
   },
   engineer: {
     role: 'engineer',
-    // tests/ deliberately absent — the engineer cannot see or modify tests.
-    mounts: [SRC_RW],
+    // tests/ is read-only: the engineer reads the locked tests for context and runs
+    // them to verify, but the `ro` mode makes modifying one structurally impossible.
+    mounts: [SRC_RW, TESTS_RO],
     network: 'proxy',
     user: AGENT_USER,
     capDrop: CAP_DROP_ALL,
@@ -94,8 +98,13 @@ export function assertProfileInvariants(profiles: Record<Role, RoleProfile> = RO
       }
     }
 
-    if (key === 'engineer' && profile.mounts.some((m) => m.hostSubpath === 'tests')) {
-      throw new Error(`${where}: engineer must not mount tests/ (structural test integrity)`);
+    if (
+      key === 'engineer' &&
+      profile.mounts.some((m) => m.hostSubpath === 'tests' && m.mode === 'rw')
+    ) {
+      throw new Error(
+        `${where}: engineer must not mount tests/ read-write (structural test integrity — read-only is allowed)`,
+      );
     }
     if (key === 'reviewer') {
       if (profile.mounts.some((m) => m.mode === 'rw')) {

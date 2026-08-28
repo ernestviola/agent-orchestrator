@@ -1,0 +1,11 @@
+{
+  "testCmd": "node --test",
+  "srcDir": "src",
+  "testsDir": "tests",
+  "sandboxReadonlyPaths": [
+    "package.json"
+  ],
+  "sandboxWritablePaths": [
+    "vendor"
+  ]
+}

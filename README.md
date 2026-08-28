@@ -47,11 +47,25 @@ read-only / read-write mounts, and **never** any git credential. See `docs/DESIG
    npm run sandbox:build
    ```
 
-4. A **target project** to work on. It must:
-   - live inside `/workspace` (only in-repo paths are wired),
-   - have an `orq-project.json` at its root: `{ "testCmd": "...", "srcDir": "src", "testsDir": "tests" }`,
-   - be **dependency-free** — the sandbox has no writable `node_modules` yet, so the target's
-     `testCmd` has to run without an install step. `fixtures/sample-project/` is the known-good one.
+4. A **target project** to work on, inside `/workspace` (only in-repo paths are wired), with an
+   `orq-project.json` at its root:
+
+   ```jsonc
+   {
+     "testCmd": "npm test",
+     "srcDir": "src",
+     "testsDir": "tests",
+     // optional — paths the testCmd needs, mounted read-only from the real target:
+     "sandboxReadonlyPaths": ["package.json", "tsconfig.json", "vitest.config.ts"],
+     // optional — paths the testCmd writes into; copied into the throwaway working copy:
+     "sandboxWritablePaths": ["node_modules"]
+   }
+   ```
+
+   `node_modules` goes in `sandboxWritablePaths` (Vite/Vitest bundle the config into
+   `node_modules/.vite-temp`). Each path must exist in the target and is rejected if it looks
+   like a credential file. `fixtures/sample-project/` (no deps) and this repo's own root
+   `orq-project.json` are worked examples.
 
 ### Start a session
 
@@ -116,9 +130,10 @@ npm run dev -- --test-engineer fixtures/sample-project "Add tests asserting fizz
 npm run dev -- --reap          # clean up orphaned containers / networks
 ```
 
-`--engineer` edits `src/` and loops until `testCmd` passes; `--test-engineer` edits `tests/`
-once (its drafted tests are expected to fail until an engineer implements the code). The
-printed result includes a diff; the real project on disk is never modified.
+`--engineer` edits `src/` (and reads `tests/` read-only to verify) and loops until `testCmd`
+passes; `--test-engineer` edits `tests/` once (its drafted tests are expected to fail until an
+engineer implements the code). The printed result includes a diff; the real project on disk is
+never modified. `npm run dev -- --engineer .` runs against this repo itself.
 
 ## Development
 
@@ -133,7 +148,7 @@ npm run test:integration   # integration tests (tests/*.integration.test.ts) —
 
 ## Status
 
-The provisioning layer, the **engineer** + **test-engineer** slices, and the **orchestrator
-loop + human approval gate** work end to end with a real model. No **reviewer** runtime yet,
-and the orchestrator can only target dependency-free projects until writable-deps sandbox
-support lands — see `docs/CONTEXT.md`.
+The provisioning layer, the **engineer** + **test-engineer** slices, the **orchestrator loop +
+human approval gate**, and **sandbox dependency support** all work end to end with a real
+model — including `--orchestrate .` against this repo itself. No **reviewer** runtime yet, and
+`testCmd` doesn't yet run a typecheck inside the sub-agent — see `docs/CONTEXT.md`.

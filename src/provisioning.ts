@@ -123,6 +123,15 @@ export class LocalResultStore implements ResultStore {
     await fs.cp(origSrc, path.join(workDir, 'src'), { recursive: true });
     await fs.cp(origTests, path.join(workDir, 'tests'), { recursive: true });
 
+    // Writable support paths (e.g. node_modules) — copied so the sub-agent's testCmd
+    // can write into them without touching the real target. `cp -a` (fast, preserves
+    // symlinks / perms) rather than fs.cp (slow over a big node_modules).
+    for (const rel of opts.manifest.sandboxWritablePaths ?? []) {
+      const dest = path.join(workDir, rel);
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await execFileAsync('cp', ['-a', path.join(opts.projectPath, rel), dest]);
+    }
+
     // The non-root `agent` user (uid 1000) inside the sub-agent must be able to write
     // its edits and its result. Throwaway per-run dirs, so a permissive mode is fine.
     // The whole working copy is opened up: which subtree is actually writable is
@@ -262,6 +271,19 @@ export interface AgentCreateArgs {
   /** `'none'` for a no-network role, otherwise the per-run internal network name. */
   networkMode: string;
   env: string[];
+  /**
+   * Extra read-only binds from the *real target project* (not the working copy) —
+   * `manifest.sandboxReadonlyPaths` resolved to `{ host source, container target }`.
+   * Always `:ro`, so they widen what the sub-agent can read (deps, config) without
+   * widening what any role can write.
+   */
+  readonlyProjectMounts?: { source: string; target: string }[];
+  /**
+   * `manifest.sandboxWritablePaths` — relative names already `cp -a`'d into the
+   * staged working copy by `prepare`. Mounted `:rw` from there (so `testCmd` can
+   * write into e.g. `node_modules`), never from the real target.
+   */
+  writableProjectPaths?: string[];
 }
 
 /**
@@ -274,6 +296,11 @@ export function buildAgentCreateOptions(args: AgentCreateArgs): Docker.Container
     ...profile.mounts.map(
       (m) => `${path.posix.join(hostWorkspacePath, m.hostSubpath)}:${m.containerPath}:${m.mode}`,
     ),
+    ...(args.writableProjectPaths ?? []).map(
+      (rel) =>
+        `${path.posix.join(hostWorkspacePath, rel)}:${path.posix.join(WORKSPACE_MOUNT, rel)}:rw`,
+    ),
+    ...(args.readonlyProjectMounts ?? []).map((m) => `${m.source}:${m.target}:ro`),
     `${mountSources.inDir}:/task:ro`,
     `${mountSources.outDir}:/out:rw`,
   ];
@@ -323,6 +350,32 @@ export async function spinUpAgent(
 
   const projectPath = params.projectPath ?? process.cwd();
   const manifest = await loadManifest(projectPath);
+
+  // Resolve `sandboxReadonlyPaths` (deps + config the target's testCmd needs) to
+  // real-target host binds. Read-only, so no role gains write access — `src/roles.ts`
+  // is untouched. Fail before any Docker resource is created.
+  let readonlyProjectMounts: { source: string; target: string }[] = [];
+  if (manifest.sandboxReadonlyPaths?.length) {
+    const targetHostPath = await resolveTargetHostPath(docker, projectPath);
+    readonlyProjectMounts = await Promise.all(
+      manifest.sandboxReadonlyPaths.map(async (rel) => {
+        assertSafeSandboxPath(rel);
+        try {
+          await fs.access(path.join(projectPath, rel));
+        } catch (cause) {
+          throw new Error(
+            `${MANIFEST_FILE} lists sandboxReadonlyPaths "${rel}" but it does not exist in ${projectPath} ` +
+              '(install the target\'s dependencies first)',
+            { cause },
+          );
+        }
+        return {
+          source: path.posix.join(targetHostPath, rel.split(path.sep).join('/')),
+          target: path.posix.join(WORKSPACE_MOUNT, rel.split(path.sep).join('/')),
+        };
+      }),
+    );
+  }
 
   const prepared = await store.prepare(runId, { projectPath, manifest });
   if (!prepared.mountSources) {
@@ -415,6 +468,8 @@ export async function spinUpAgent(
         mountSources: prepared.mountSources,
         networkMode,
         env,
+        readonlyProjectMounts,
+        writableProjectPaths: manifest.sandboxWritablePaths ?? [],
       }),
     );
 
@@ -507,7 +562,66 @@ async function loadManifest(projectPath: string): Promise<ProjectManifest> {
       throw new Error(`${MANIFEST_FILE} is missing a valid "${key}"`);
     }
   }
+  for (const key of ['sandboxReadonlyPaths', 'sandboxWritablePaths'] as const) {
+    const val = parsed[key];
+    if (val === undefined) continue;
+    if (!Array.isArray(val) || !val.every((p) => typeof p === 'string')) {
+      throw new Error(`${MANIFEST_FILE}: "${key}" must be an array of strings`);
+    }
+    for (const p of val) assertSafeSandboxPath(p);
+  }
+  const overlap = (parsed.sandboxReadonlyPaths ?? []).filter((p) =>
+    (parsed.sandboxWritablePaths ?? []).includes(p),
+  );
+  if (overlap.length) {
+    throw new Error(
+      `${MANIFEST_FILE}: "${overlap[0]}" is in both sandboxReadonlyPaths and sandboxWritablePaths`,
+    );
+  }
   return parsed as ProjectManifest;
+}
+
+/** Sensitive-file patterns a `sandboxReadonlyPaths` entry must not match (mirrors AGENTS.md §6). */
+const SECRETISH = /(^|[/.])(\.env|.*secret.*|.*credential.*|.*token.*)|\.(pem|key|p12|pfx)$|(^|\/)\.git(\/|$)/i;
+
+/**
+ * Guard for a `sandboxReadonlyPaths` entry: a plain relative path inside the target
+ * project, never a credential file. Throws with a clear message; exported for tests.
+ */
+export function assertSafeSandboxPath(rel: string): void {
+  if (!rel || typeof rel !== 'string') {
+    throw new Error(`${MANIFEST_FILE}: sandboxReadonlyPaths entry must be a non-empty string`);
+  }
+  if (path.isAbsolute(rel) || rel.split(/[/\\]/).includes('..')) {
+    throw new Error(
+      `${MANIFEST_FILE}: sandboxReadonlyPaths entry "${rel}" must be a relative path within the project (no "..", no leading "/")`,
+    );
+  }
+  if (SECRETISH.test(rel)) {
+    throw new Error(
+      `${MANIFEST_FILE}: refusing to mount "${rel}" into a sub-agent — it looks like a credential file`,
+    );
+  }
+}
+
+/**
+ * Host-daemon path of a target project that lives inside the orchestrator's
+ * `/workspace`. Built from the orchestrator's own `/workspace` bind mount plus the
+ * target's subpath. Throws for a target outside `/workspace` (only in-repo targets
+ * are supported). Assumes the orchestrator process runs with its cwd under
+ * `/workspace` (it does, via the npm scripts).
+ */
+export async function resolveTargetHostPath(docker: Docker, projectPath: string): Promise<string> {
+  const base = await resolveProjectHostPath(docker);
+  const rel = path.relative(WORKSPACE_MOUNT, path.resolve(projectPath));
+  if (rel === '') return base;
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(
+      `target project "${projectPath}" is outside the orchestrator's ${WORKSPACE_MOUNT}; ` +
+        'only in-repo targets are supported',
+    );
+  }
+  return path.posix.join(base, rel.split(path.sep).join('/'));
 }
 
 async function assertImageExists(docker: Docker, image: string): Promise<void> {

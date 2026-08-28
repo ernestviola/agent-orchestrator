@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -7,9 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRoleProfile } from '../src/roles.js';
 import {
   LocalResultStore,
+  assertSafeSandboxPath,
   buildAgentCreateOptions,
   demuxDockerLogs,
   resolveProjectHostPath,
+  resolveTargetHostPath,
   spinUpAgent,
   type ProvisioningDeps,
 } from '../src/provisioning.js';
@@ -23,6 +26,20 @@ import type {
 
 const FIXTURE = path.join(process.cwd(), 'fixtures', 'sample-project');
 const MANIFEST: ProjectManifest = { testCmd: 'node --test', srcDir: 'src', testsDir: 'tests' };
+
+/**
+ * `LocalResultStore.finalize` shells out to `git diff --no-index` (a local diffing
+ * tool, not a repo op). The orchestrator container has git; a sub-agent sandbox
+ * deliberately does not, so these run in CI / dev and skip when self-hosting.
+ */
+const HAS_GIT = (() => {
+  try {
+    execFileSync('git', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 // --------------------------------------------------------------------------------------
 // buildAgentCreateOptions — the role -> HostConfig mapping (pure, no Docker)
@@ -65,10 +82,11 @@ describe('buildAgentCreateOptions', () => {
     expect(binds).toContain(`${WORK}/src:/workspace/src:rw`);
   });
 
-  it('engineer: src/ read-write, tests/ not mounted', () => {
+  it('engineer: src/ read-write, tests/ read-only', () => {
     const binds = opts('engineer').HostConfig?.Binds ?? [];
     expect(binds).toContain(`${WORK}/src:/workspace/src:rw`);
-    expect(binds.some((b) => b.includes('/workspace/tests'))).toBe(false);
+    expect(binds).toContain(`${WORK}/tests:/workspace/tests:ro`);
+    expect(binds.some((b) => b.includes('/workspace/tests') && b.endsWith(':rw'))).toBe(false);
   });
 
   it('test-engineer: tests/ read-write, src/ read-only', () => {
@@ -87,6 +105,32 @@ describe('buildAgentCreateOptions', () => {
     const o = opts('engineer', 'orq-r1', ['HTTP_PROXY=http://proxy:8888']);
     expect(o.HostConfig?.NetworkMode).toBe('orq-r1');
     expect(o.Env).toContain('HTTP_PROXY=http://proxy:8888');
+  });
+
+  it('appends readonlyProjectMounts as :ro binds and leaves them out when absent', () => {
+    expect(opts('engineer').HostConfig?.Binds).not.toContain(
+      '/t/node_modules:/workspace/node_modules:ro',
+    );
+    const o = buildAgentCreateOptions({
+      profile: getRoleProfile('engineer'),
+      sandboxImage: 'orq-sandbox:dev',
+      runId: 'r1',
+      hostWorkspacePath: WORK,
+      mountSources: MS,
+      networkMode: 'none',
+      env: [],
+      readonlyProjectMounts: [
+        { source: '/t/node_modules', target: '/workspace/node_modules' },
+        { source: '/t/package.json', target: '/workspace/package.json' },
+      ],
+    });
+    const binds = o.HostConfig?.Binds ?? [];
+    expect(binds).toContain('/t/node_modules:/workspace/node_modules:ro');
+    expect(binds).toContain('/t/package.json:/workspace/package.json:ro');
+    // still after the role mount, before /task + /out
+    expect(binds.indexOf('/t/node_modules:/workspace/node_modules:ro')).toBeLessThan(
+      binds.indexOf(`${MS.inDir}:/task:ro`),
+    );
   });
 });
 
@@ -142,6 +186,56 @@ describe('resolveProjectHostPath', () => {
 });
 
 // --------------------------------------------------------------------------------------
+// assertSafeSandboxPath
+// --------------------------------------------------------------------------------------
+
+describe('assertSafeSandboxPath', () => {
+  it.each(['node_modules', 'package.json', 'package-lock.json', 'tsconfig.test.json', 'vitest.config.ts', 'config/app.json'])(
+    'accepts %s',
+    (p) => {
+      expect(() => assertSafeSandboxPath(p)).not.toThrow();
+    },
+  );
+
+  it.each(['/etc/passwd', '../outside', 'a/../b', 'x/../../y'])('rejects the traversal %s', (p) => {
+    expect(() => assertSafeSandboxPath(p)).toThrow(/relative path within the project/);
+  });
+
+  it.each(['.env', '.env.local', 'config/.env', 'server.pem', 'id.key', 'my-secret.json', 'auth-token.txt', 'aws.credentials', '.git/config'])(
+    'rejects the credential-ish path %s',
+    (p) => {
+      expect(() => assertSafeSandboxPath(p)).toThrow(/credential file|relative path within the project/);
+    },
+  );
+});
+
+// --------------------------------------------------------------------------------------
+// resolveTargetHostPath
+// --------------------------------------------------------------------------------------
+
+describe('resolveTargetHostPath', () => {
+  const docker = {
+    getContainer: vi.fn().mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Mounts: [{ Destination: '/workspace', Source: '/host/proj' }] }),
+    }),
+  } as never;
+
+  it('returns the orchestrator host path for the repo root itself', async () => {
+    await expect(resolveTargetHostPath(docker, '/workspace')).resolves.toBe('/host/proj');
+  });
+
+  it('joins the subpath for an in-repo target', async () => {
+    await expect(resolveTargetHostPath(docker, '/workspace/fixtures/sample-project')).resolves.toBe(
+      '/host/proj/fixtures/sample-project',
+    );
+  });
+
+  it('throws for a target outside /workspace', async () => {
+    await expect(resolveTargetHostPath(docker, '/etc')).rejects.toThrow(/only in-repo targets/);
+  });
+});
+
+// --------------------------------------------------------------------------------------
 // LocalResultStore
 // --------------------------------------------------------------------------------------
 
@@ -177,7 +271,7 @@ describe('LocalResultStore', () => {
     });
   });
 
-  it('finalize reads the summary + iterations the sub-agent wrote, with an empty diff for an untouched copy', async () => {
+  it.skipIf(!HAS_GIT)('finalize reads the summary + iterations the sub-agent wrote, with an empty diff for an untouched copy', async () => {
     const store = new LocalResultStore(root, '/host');
     const p = await store.prepare('run8', prepOpts());
     await fs.writeFile(
@@ -192,7 +286,7 @@ describe('LocalResultStore', () => {
     expect(r.outputDir).toBe(p.outDir);
   });
 
-  it('finalize returns a unified diff when the working copy of src/ changed', async () => {
+  it.skipIf(!HAS_GIT)('finalize returns a unified diff when the working copy of src/ changed', async () => {
     const store = new LocalResultStore(root, '/host');
     const p = await store.prepare('run8b', prepOpts());
     await fs.writeFile(path.join(p.workDir, 'src', 'a.mjs'), 'export const a = 42;\n');
@@ -204,7 +298,7 @@ describe('LocalResultStore', () => {
     expect(await fs.readFile(path.join(p.outDir, 'diff.patch'), 'utf8')).toBe(r.diff);
   });
 
-  it('finalize returns a unified diff when the working copy of tests/ changed', async () => {
+  it.skipIf(!HAS_GIT)('finalize returns a unified diff when the working copy of tests/ changed', async () => {
     const store = new LocalResultStore(root, '/host');
     const p = await store.prepare('run8c', prepOpts());
     await fs.writeFile(path.join(p.workDir, 'tests', 'a.test.mjs'), '// new assertions\n');
@@ -222,7 +316,7 @@ describe('LocalResultStore', () => {
     expect(await fs.readFile(path.join(p.outDir, 'diff.patch'), 'utf8')).toBe(r.diff);
   });
 
-  it('finalize downgrades a clean exit to "failed" when no status.json was produced', async () => {
+  it.skipIf(!HAS_GIT)('finalize downgrades a clean exit to "failed" when no status.json was produced', async () => {
     const store = new LocalResultStore(root, '/host');
     await store.prepare('run9', prepOpts());
     const r = await store.finalize('run9', ctx('completed', 0));
@@ -449,6 +543,36 @@ describe('spinUpAgent', () => {
     await expect(
       spinUpAgent({ role: 'engineer', task: { task: 'x' }, projectPath: FIXTURE }, deps),
     ).rejects.toThrow(/OPENROUTER_API_KEY is not set/);
+  });
+
+  // fixtures/node-runtime-project has sandboxReadonlyPaths:["package.json"] + sandboxWritablePaths:["vendor"]
+  const NODE_FIXTURE = path.join(process.cwd(), 'fixtures', 'node-runtime-project');
+
+  it('mounts sandboxReadonlyPaths :ro from the real target and sandboxWritablePaths :rw from the working copy', async () => {
+    const { deps, created } = makeDeps(root);
+
+    await spinUpAgent({ role: 'engineer', task: { task: 'x' }, projectPath: NODE_FIXTURE }, deps);
+
+    const agent = created.find((c) => c.name?.startsWith('orq-agent-'))!;
+    const binds = (agent.opts as { HostConfig: { Binds: string[] } }).HostConfig.Binds;
+    // mock docker reports the orchestrator's /workspace host path as /host/project
+    expect(binds).toContain(
+      '/host/project/fixtures/node-runtime-project/package.json:/workspace/package.json:ro',
+    );
+    // writable path is mounted from the staged working copy, not the real target
+    const workVendor = binds.find((b) => b.endsWith(':/workspace/vendor:rw'));
+    expect(workVendor).toBeDefined();
+    expect(workVendor).not.toContain('/fixtures/node-runtime-project/');
+  });
+
+  it('fails before creating Docker resources when a sandboxReadonlyPaths entry is missing', async () => {
+    const { deps, docker } = makeDeps(root);
+    vi.spyOn(fs, 'access').mockRejectedValueOnce(new Error('ENOENT'));
+
+    await expect(
+      spinUpAgent({ role: 'engineer', task: { task: 'x' }, projectPath: NODE_FIXTURE }, deps),
+    ).rejects.toThrow(/sandboxReadonlyPaths "package\.json" but it does not exist/);
+    expect(docker.createContainer).not.toHaveBeenCalled();
   });
 
   it('reviewer: no network, no proxy, no model env', async () => {

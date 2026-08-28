@@ -33,8 +33,9 @@ export const SPIN_UP_AGENT_TOOL: ChatTool = {
       'task, wait for it to finish, and return its result (status, summary, iteration ' +
       'count, and a unified diff of its working copy). The container is torn down ' +
       'afterwards; nothing is committed. Roles: "test-engineer" writes tests/ with ' +
-      'src/ read-only; "engineer" writes src/ and cannot see tests/ at all; ' +
-      '"reviewer" is read-only (NOT YET IMPLEMENTED — do not use). An "engineer" ' +
+      'src/ read-only; "engineer" writes src/ and reads tests/ read-only (it runs ' +
+      'them to verify but cannot modify one); "reviewer" is read-only (NOT YET ' +
+      'IMPLEMENTED — do not use). An "engineer" ' +
       'call is refused until any test-engineer output produced this session has been ' +
       'approved by the human.',
     parameters: {
@@ -73,8 +74,8 @@ const SYSTEM_PROMPT = [
   '- test-engineer: writes/updates files under tests/ to capture requirements as',
   '  executable tests. Sees src/ read-only. Its tests are EXPECTED to fail until an',
   '  engineer implements the code.',
-  '- engineer: writes/updates files under src/ to make the tests pass. Cannot see',
-  '  tests/ at all — give it what it needs in the task/context.',
+  '- engineer: writes/updates files under src/ to make the tests pass. Reads tests/',
+  '  read-only (it runs them to verify its work) but cannot modify a test.',
   '- reviewer: NOT YET IMPLEMENTED. Do not delegate to it.',
   '',
   'Human approval gate (non-negotiable): after a test-engineer run the system itself',

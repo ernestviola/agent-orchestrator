@@ -87,6 +87,27 @@ export interface ProjectManifest {
   srcDir: string;
   /** Tests dir relative to the project root. */
   testsDir: string;
+  /**
+   * Extra project-root paths (files or dirs) bind-mounted **read-only** into every
+   * sub-agent at the same relative location under `/workspace`, so `testCmd` can run
+   * — e.g. `node_modules`, `package.json`, a tsconfig / test-runner config. Always
+   * read-only, so they add no write capability to any role and need no change to
+   * `src/roles.ts`. Each entry must be a safe relative path (no `..`, no leading
+   * `/`) and is rejected if it looks like a credential file (`.env`, `*.pem`,
+   * `*.key`, `*secret*`, `*token*`, `*credential*`, `.git`). The path must already
+   * exist in the target — the sub-agent gets the deps the target has installed, it
+   * does not install them.
+   */
+  sandboxReadonlyPaths?: string[];
+  /**
+   * Like `sandboxReadonlyPaths`, but the path is **copied** into the per-run working
+   * copy and mounted read-write, so `testCmd` can write into it — e.g. `node_modules`
+   * (Vite/Vitest bundle the config into `node_modules/.vite-temp`). The copy is
+   * throwaway and discarded on cleanup; the real target is never written. Same safety
+   * validation as `sandboxReadonlyPaths`. Costs one `cp -a` per run. A path may be in
+   * `sandboxReadonlyPaths` or `sandboxWritablePaths`, not both.
+   */
+  sandboxWritablePaths?: string[];
 }
 
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
