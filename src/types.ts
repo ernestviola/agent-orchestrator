@@ -109,9 +109,10 @@ export interface AgentResult {
   /** Short human-readable summary the sub-agent wrote into `out/status.json`. */
   summary: string;
   /**
-   * Unified diff of the sub-agent's working copy of `src/` against the original
-   * target `src/`. Empty string when nothing changed. This is the reviewable artifact
-   * the human approval gate will consume.
+   * Unified diff of the sub-agent's working copy against the original target, over
+   * both `src/` and `tests/`. Only the role's writable subtree can differ (engineer
+   * → `src/`, test-engineer → `tests/`). Empty string when nothing changed. This is
+   * the reviewable artifact the human approval gate will consume.
    */
   diff: string;
   /** How many agent loop iterations ran (from `out/status.json`), when reported. */
