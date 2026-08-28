@@ -51,7 +51,8 @@ Do not modify any of the following without explicit confirmation from the user:
 ## 6. Security Considerations
 
 - Never read, print, or commit files matching: `.env`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*secret*`, `*credential*`, `*token*`
-- This container holds `GITHUB_TOKEN` (via `.env.local`) and will hold `OPENROUTER_API_KEY`. Never print these values, even partially, in any output.
+- This container holds `GITHUB_TOKEN` and `OPENROUTER_API_KEY` (via `.env.local`). Never print these values, even partially, in any output.
+- `OPENROUTER_API_KEY` is injected into proxy-network sub-agent containers as a *model* credential. It is explicitly NOT covered by the git-credential boundary below (git is) — but it must still never appear in logs, `task.json`, or committed files.
 - Per the design doc's git-credential boundary: only this orchestrator container performs git operations. Sub-agent containers this code provisions must never receive git credentials or perform git operations themselves — this is a hard architectural rule, not a preference, when writing or modifying provisioning logic.
 - To extend network access for this container, edit `docker-compose.yml` directly (this container has no egress proxy — see design doc's two-tier model for why).
 
